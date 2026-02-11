@@ -1,2 +1,485 @@
-Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): 2026-02-11 21:17:35
-Current User's Login: ManironRafnrun
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Enchanted Floating Objects</title>
+  <style>
+    :root{
+      --fg: rgba(255, 245, 220, 0.95);
+      --fg2: rgba(255, 245, 220, 0.75);
+      --glow: rgba(255, 210, 120, 0.18);
+      --shadow: rgba(0,0,0,0.25);
+      --bubble-bg: rgba(18, 14, 10, 0.72);
+      --bubble-br: rgba(255, 230, 170, 0.25);
+    }
+
+    /* Transparent background for Notion embed */
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif;
+    }
+
+    #stage {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      background: transparent;
+    }
+
+    canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* Speech bubbles */
+    .bubble {
+      position: absolute;
+      max-width: min(320px, 70vw);
+      color: var(--fg);
+      background: var(--bubble-bg);
+      border: 1px solid var(--bubble-br);
+      border-radius: 14px;
+      padding: 10px 12px;
+      box-shadow:
+        0 10px 30px var(--shadow),
+        0 0 40px var(--glow);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      transform: translate(-50%, -110%);
+      opacity: 0;
+      pointer-events: none;
+      line-height: 1.2;
+      font-size: 14px;
+      letter-spacing: 0.1px;
+      animation: pop 3.6s ease forwards;
+      white-space: pre-wrap;
+    }
+    .bubble::after{
+      content:"";
+      position:absolute;
+      left: 22px;
+      bottom: -9px;
+      width: 14px;
+      height: 14px;
+      background: var(--bubble-bg);
+      border-right: 1px solid var(--bubble-br);
+      border-bottom: 1px solid var(--bubble-br);
+      transform: rotate(45deg);
+      border-bottom-right-radius: 3px;
+    }
+    @keyframes pop{
+      0%{ opacity:0; transform: translate(-50%, -100%) scale(0.98); }
+      10%{ opacity:1; transform: translate(-50%, -112%) scale(1); }
+      70%{ opacity:1; transform: translate(-50%, -118%) scale(1); }
+      100%{ opacity:0; transform: translate(-50%, -126%) scale(0.99); }
+    }
+
+    /* Tiny hint overlay (optional) */
+    #hint {
+      position: absolute;
+      left: 12px;
+      bottom: 10px;
+      color: rgba(255,245,220,0.65);
+      font-size: 12px;
+      text-shadow: 0 2px 10px rgba(0,0,0,0.45);
+      user-select: none;
+      pointer-events: none;
+    }
+
+    /* Respect reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      .bubble { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="hint">Магия: клик/тап — проказа полтергейста</div>
+  </div>
+
+  <script>
+    // =========================
+    // CONFIG — tweak these
+    // =========================
+    const CFG = {
+      density: 14,               // number of floating objects
+      particleDensity: 55,       // ambient sparkles
+      prankIntervalMs: [1800, 4200], // random range
+      objectScale: [0.7, 1.25],
+      speed: [0.12, 0.42],
+      wobble: [0.6, 1.6],
+      rotationSpeed: [-0.012, 0.012],
+      bubbleChanceOnClick: 0.95,
+      bubbleChanceAmbient: 0.55,
+      maxBubbles: 2,             // concurrent bubbles (keep low for Notion)
+      // Keep it generic: "mischievous poltergeist" vibe, no franchise names
+      pranksRU: [
+        "Ой… кто-то забыл равновесие.\nЯ просто… проверяю гравитацию.",
+        "Тсс! Это была не я.\nЭто… воздух был подозрительный.",
+        "Если что — это тренировка реакции.\nТы справляешься… почти.",
+        "Проверка: ты танцуешь или уклоняешься?\nОба навыка полезны.",
+        "Внимание: летучая обувь.\nБереги пальцы 😈",
+        "Секретный режим: «не моргай».\nЯ уже начал(а).",
+        "Опа! Предметы сами себя нашли.\nСовпадение? Не думаю.",
+        "Я добавил(а) немного хаоса.\nДля баланса. Для искусства.",
+        "Если это упало — значит, так задумано.\n(Нет.)",
+        "Это не беспорядок.\nЭто… композиция."
+      ],
+      // Simple vector "icons" drawn on canvas (not emojis = more consistent)
+      // We'll draw stylized silhouettes: candle, book, hat, key, cup, ribbon
+      objects: ["candle","book","hat","key","cup","ribbon","note","feather"]
+    };
+
+    // =========================
+    // Helpers
+    // =========================
+    const rand = (a,b)=>a+Math.random()*(b-a);
+    const randi = (a,b)=>Math.floor(rand(a,b+1));
+    const pick = arr => arr[Math.floor(Math.random()*arr.length)];
+    const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+
+    const stage = document.getElementById("stage");
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d", { alpha: true });
+
+    let W=0,H=0, DPR=1;
+
+    function resize(){
+      const rect = stage.getBoundingClientRect();
+      DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      W = Math.floor(rect.width);
+      H = Math.floor(rect.height);
+      canvas.width = Math.floor(W * DPR);
+      canvas.height = Math.floor(H * DPR);
+      canvas.style.width = W+"px";
+      canvas.style.height = H+"px";
+      ctx.setTransform(DPR,0,0,DPR,0,0);
+    }
+    window.addEventListener("resize", resize, { passive:true });
+    resize();
+
+    // =========================
+    // Ambient particles (sparkles/dust)
+    // =========================
+    const particles = Array.from({length: CFG.particleDensity}, () => ({
+      x: Math.random()*W,
+      y: Math.random()*H,
+      r: rand(0.6, 1.8),
+      a: rand(0.08, 0.22),
+      vx: rand(-0.06, 0.06),
+      vy: rand(-0.03, 0.08),
+      tw: rand(0.6, 1.8),
+      ph: rand(0, Math.PI*2)
+    }));
+
+    // =========================
+    // Floating objects
+    // =========================
+    function makeObj(){
+      const t = pick(CFG.objects);
+      const s = rand(CFG.objectScale[0], CFG.objectScale[1]);
+      return {
+        type: t,
+        x: rand(0.1*W, 0.9*W),
+        y: rand(0.1*H, 0.9*H),
+        baseX: 0,
+        baseY: 0,
+        vx: rand(CFG.speed[0], CFG.speed[1]) * (Math.random()<0.5 ? -1 : 1),
+        vy: rand(CFG.speed[0], CFG.speed[1]) * (Math.random()<0.5 ? -1 : 1),
+        wob: rand(CFG.wobble[0], CFG.wobble[1]),
+        ph: rand(0, Math.PI*2),
+        rot: rand(-Math.PI, Math.PI),
+        vr: rand(CFG.rotationSpeed[0], CFG.rotationSpeed[1]),
+        s,
+        hue: rand(32, 52),              // warm gold range
+        lum: rand(72, 92),
+        alpha: rand(0.75, 0.95)
+      };
+    }
+
+    const objs = Array.from({length: CFG.density}, makeObj);
+
+    // =========================
+    // Draw helpers (vector silhouettes)
+    // =========================
+    function setGlow(color, blur=18){
+      ctx.shadowColor = color;
+      ctx.shadowBlur = blur;
+    }
+
+    function drawCandle(){
+      // candle body
+      ctx.beginPath();
+      ctx.roundRect(-10, -18, 20, 36, 6);
+      ctx.fill();
+      // flame
+      ctx.beginPath();
+      ctx.moveTo(0, -24);
+      ctx.bezierCurveTo(8,-20, 6,-8, 0,-10);
+      ctx.bezierCurveTo(-6,-8, -8,-20, 0,-24);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawBook(){
+      ctx.beginPath();
+      ctx.roundRect(-16,-12, 32, 24, 5);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(0,-12); ctx.lineTo(0,12);
+      ctx.stroke();
+    }
+
+    function drawHat(){
+      ctx.beginPath();
+      ctx.moveTo(-18, 10);
+      ctx.quadraticCurveTo(0, 18, 18, 10);
+      ctx.quadraticCurveTo(0, 14, -18, 10);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(-10, 10);
+      ctx.quadraticCurveTo(-6, -18, 0, -22);
+      ctx.quadraticCurveTo(6, -18, 10, 10);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawKey(){
+      ctx.beginPath();
+      ctx.roundRect(-6,-4, 18, 8, 3);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(-10, 0, 8, 0, Math.PI*2);
+      ctx.stroke();
+      // teeth
+      ctx.beginPath();
+      ctx.moveTo(12,-4); ctx.lineTo(12,10);
+      ctx.moveTo(18,-4); ctx.lineTo(18,6);
+      ctx.stroke();
+    }
+
+    function drawCup(){
+      ctx.beginPath();
+      ctx.roundRect(-14,-10, 28, 20, 6);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(16, 0, 8, -Math.PI/2, Math.PI/2);
+      ctx.stroke();
+    }
+
+    function drawRibbon(){
+      ctx.beginPath();
+      ctx.moveTo(-18,-6);
+      ctx.quadraticCurveTo(-6,-18, 0,-6);
+      ctx.quadraticCurveTo(6,-18, 18,-6);
+      ctx.quadraticCurveTo(6, 6, 0, -2);
+      ctx.quadraticCurveTo(-6, 6, -18,-6);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawNote(){
+      ctx.beginPath();
+      ctx.roundRect(-12,-16, 24, 32, 4);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-6,-6); ctx.lineTo(6,-6);
+      ctx.moveTo(-6,0); ctx.lineTo(6,0);
+      ctx.moveTo(-6,6); ctx.lineTo(4,6);
+      ctx.stroke();
+    }
+
+    function drawFeather(){
+      ctx.beginPath();
+      ctx.moveTo(-4, 18);
+      ctx.quadraticCurveTo(-18, 6, -6, -18);
+      ctx.quadraticCurveTo(8, -6, 10, 6);
+      ctx.quadraticCurveTo(6, 14, -4, 18);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-2, 16);
+      ctx.lineTo(8, -14);
+      ctx.stroke();
+    }
+
+    function drawObject(o){
+      const fill = `hsla(${o.hue}, 75%, ${o.lum}%, ${o.alpha})`;
+      const stroke = `hsla(${o.hue}, 75%, ${o.lum-18}%, ${Math.min(1, o.alpha+0.15)})`;
+
+      ctx.save();
+      ctx.translate(o.x, o.y);
+      ctx.rotate(o.rot);
+      ctx.scale(o.s, o.s);
+
+      // glow
+      setGlow("rgba(255, 210, 120, 0.18)", 22);
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2;
+
+      switch(o.type){
+        case "candle": drawCandle(); break;
+        case "book": drawBook(); break;
+        case "hat": drawHat(); break;
+        case "key": drawKey(); break;
+        case "cup": drawCup(); break;
+        case "ribbon": drawRibbon(); break;
+        case "note": drawNote(); break;
+        case "feather": drawFeather(); break;
+        default: drawBook();
+      }
+
+      ctx.restore();
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = "transparent";
+    }
+
+    // =========================
+    // Bubbles (prank lines)
+    // =========================
+    function spawnBubble(x,y, text){
+      // limit bubbles
+      const existing = stage.querySelectorAll(".bubble");
+      if(existing.length >= CFG.maxBubbles){
+        existing[0].remove();
+      }
+      const b = document.createElement("div");
+      b.className = "bubble";
+      b.style.left = x + "px";
+      b.style.top = y + "px";
+      b.textContent = text;
+      stage.appendChild(b);
+      setTimeout(()=>b.remove(), 3800);
+    }
+
+    function maybePrankAt(x,y, strong=false){
+      const chance = strong ? CFG.bubbleChanceOnClick : CFG.bubbleChanceAmbient;
+      if(Math.random() > chance) return;
+      spawnBubble(x,y, pick(CFG.pranksRU));
+    }
+
+    // ambient pranks
+    let prankTimer = 0;
+    function nextPrank(){
+      prankTimer = performance.now() + rand(CFG.prankIntervalMs[0], CFG.prankIntervalMs[1]);
+    }
+    nextPrank();
+
+    // click/tap pranks
+    function onPointer(e){
+      const rect = stage.getBoundingClientRect();
+      const x = (e.clientX ?? e.touches?.[0]?.clientX) - rect.left;
+      const y = (e.clientY ?? e.touches?.[0]?.clientY) - rect.top;
+
+      // find nearest object
+      let best = null, bestD = Infinity;
+      for(const o of objs){
+        const dx = o.x - x;
+        const dy = o.y - y;
+        const d = dx*dx + dy*dy;
+        if(d < bestD){
+          bestD = d; best = o;
+        }
+      }
+      if(best){
+        // "prank impulse"
+        best.vx += rand(-0.8, 0.8);
+        best.vy += rand(-0.8, 0.8);
+        best.vr += rand(-0.04, 0.04);
+        maybePrankAt(best.x, best.y, true);
+      } else {
+        maybePrankAt(x,y, true);
+      }
+    }
+    stage.addEventListener("click", onPointer, { passive:true });
+    stage.addEventListener("touchstart", onPointer, { passive:true });
+
+    // =========================
+    // Animation loop
+    // =========================
+    let last = performance.now();
+    function tick(now){
+      const dt = clamp((now-last)/16.6667, 0.2, 2.0);
+      last = now;
+
+      ctx.clearRect(0,0,W,H);
+
+      // particles
+      for(const p of particles){
+        p.ph += 0.02*dt;
+        p.x += p.vx*dt;
+        p.y += p.vy*dt;
+
+        // wrap
+        if(p.x < -10) p.x = W+10;
+        if(p.x > W+10) p.x = -10;
+        if(p.y < -10) p.y = H+10;
+        if(p.y > H+10) p.y = -10;
+
+        const a = p.a + 0.08*Math.sin(p.ph*p.tw);
+        ctx.beginPath();
+        ctx.fillStyle = `rgba(255, 220, 150, ${Math.max(0, a)})`;
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+        ctx.fill();
+      }
+
+      // objects
+      for(const o of objs){
+        o.ph += 0.012*dt;
+        o.rot += o.vr*dt;
+
+        // gentle drift + wobble
+        o.x += o.vx*dt;
+        o.y += o.vy*dt;
+        o.x += Math.sin(o.ph*o.wob) * 0.18*dt;
+        o.y += Math.cos(o.ph*o.wob) * 0.14*dt;
+
+        // soft damping
+        o.vx *= Math.pow(0.995, dt);
+        o.vy *= Math.pow(0.995, dt);
+        o.vr *= Math.pow(0.992, dt);
+
+        // bounce off edges
+        const pad = 24*o.s;
+        if(o.x < pad){ o.x = pad; o.vx = Math.abs(o.vx) + 0.08; }
+        if(o.x > W-pad){ o.x = W-pad; o.vx = -Math.abs(o.vx) - 0.08; }
+        if(o.y < pad){ o.y = pad; o.vy = Math.abs(o.vy) + 0.08; }
+        if(o.y > H-pad){ o.y = H-pad; o.vy = -Math.abs(o.vy) - 0.08; }
+
+        drawObject(o);
+      }
+
+      // ambient prank timing
+      if(now > prankTimer){
+        const o = pick(objs);
+        // tiny nudge
+        o.vx += rand(-0.25, 0.25);
+        o.vy += rand(-0.18, 0.18);
+        o.vr += rand(-0.01, 0.01);
+        maybePrankAt(o.x, o.y, false);
+        nextPrank();
+      }
+
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    // Hide hint on small embeds after a bit (keeps it clean in Notion)
+    setTimeout(()=>{
+      const hint = document.getElementById("hint");
+      if(hint) hint.style.opacity = "0";
+    }, 5500);
+  </script>
+</body>
+</html>
